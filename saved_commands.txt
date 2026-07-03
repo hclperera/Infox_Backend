@@ -1,0 +1,30 @@
+    1  sudo apt update && sudo apt upgrade -y
+    2  sudo apt install python3-pip python3-venv mysql-server -y
+    3  sudo mysql
+    4  ls
+    5  pwd
+    6  mkdir infox-backend
+    7  cd infox-backend
+    8  python3 -m venv venv
+    9  source venv/bin/activate
+   10  pip install --upgrade pip
+   11  pip install fastapi uvicorn mysql-connector-python python-dotenv
+   12  nano .env
+   13  vi .env
+   14  nano main.py
+   15  uvicorn main:app --host 0.0.0.0 --port 8000
+   16  sudo mysql -u raven -p -D infox_db
+   17  pip install "passlib[bcrypt]"
+   18  nano main.py
+   19  ls
+   20  vi main.py
+   21  uvicorn main:app --host 0.0.0.0 --port 8000
+   22  vi main.py
+   23  uvicorn main:app --host 0.0.0.0 --port 8000
+   24  pip install bcrypt==3.2.2
+   25  uvicorn main:app --host 0.0.0.0 --port 8000
+   26  sudo nano /etc/systemd/system/infox_api.service
+   27  sudo systemctl daemon-reload
+   28  sudo systemctl enable infox_api
+   29  sudo systemctl start infox_api
+   30  history > saved_commands.txt
