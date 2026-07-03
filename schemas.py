@@ -21,3 +21,10 @@ class ChangePasswordRequest(BaseModel):
     user_id: int
     current_password: str
     new_password: str
+
+# Schema for user settings
+class UserSettings(BaseModel):
+    user_id: int
+    speech_rate: float
+    voice_type: str
+    language: str
