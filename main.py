@@ -12,6 +12,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",       # Next.js local dev
+        "https://infox-admin-alpha.vercel.app/",
         # Add your Vercel deployment URL here once deployed, e.g.:
         # "https://infox-admin.vercel.app",
     ],
