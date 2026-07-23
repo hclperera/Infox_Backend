@@ -7,14 +7,13 @@ from routers import auth, settings, admin
 
 app = FastAPI(title="InfoX Assistive Reader API")
 
-# CORS middleware — allow the admin panel (Vercel) and local dev to access the API
+# CORS middleware — allow the admin panel and local dev to access the API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",       # Next.js local dev
-        "https://infox-admin-alpha.vercel.app/",
-        # Add your Vercel deployment URL here once deployed, e.g.:
-        # "https://infox-admin.vercel.app",
+        "http://localhost:3000",                    # Next.js local dev
+        "https://infox-admin-alpha.vercel.app",     # Vercel preview deployments
+        "https://admin.projectinfox.tech",          # Custom admin domain
     ],
     allow_credentials=True,
     allow_methods=["*"],
