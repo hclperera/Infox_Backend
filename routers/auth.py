@@ -63,7 +63,9 @@ def login(user: UserLogin):
     return {
         "success": True, 
         "message": "Login successful",
-        "user_id": db_user["user_id"]
+        "user_id": db_user["user_id"],
+        "username": db_user["username"],
+        "email": db_user["email"]
     }
 
 @router.put("/update-username")
