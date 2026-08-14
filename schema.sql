@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Create Settings Table
 CREATE TABLE IF NOT EXISTS settings (
     settings_id INT PRIMARY KEY AUTO_INCREMENT,
-    user_id INT NOT NULL,
+    user_id INT NOT NULL UNIQUE,
     speech_rate FLOAT NOT NULL,
     voice_type VARCHAR(50) NOT NULL,
     haptic_vibration BOOLEAN NOT NULL DEFAULT TRUE,
