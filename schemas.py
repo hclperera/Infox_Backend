@@ -27,4 +27,4 @@ class UserSettings(BaseModel):
     user_id: int
     speech_rate: float
     voice_type: str
-    language: str
+    haptic_vibration: bool

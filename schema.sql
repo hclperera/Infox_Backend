@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS settings (
     user_id INT NOT NULL,
     speech_rate FLOAT NOT NULL,
     voice_type VARCHAR(50) NOT NULL,
-    language VARCHAR(50) NOT NULL,
+    haptic_vibration BOOLEAN NOT NULL DEFAULT TRUE,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 

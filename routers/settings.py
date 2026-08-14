@@ -19,7 +19,7 @@ def get_settings(user_id: int):
                 "user_id": user_id,
                 "speech_rate": 1.0,
                 "voice_type": "Female",
-                "language": "Sinhala"
+                "haptic_vibration": True
             }
             
         return settings
@@ -47,19 +47,19 @@ def update_settings(settings: UserSettings):
             cursor.execute(
                 """
                 UPDATE settings 
-                SET speech_rate = %s, voice_type = %s, language = %s 
+                SET speech_rate = %s, voice_type = %s, haptic_vibration = %s 
                 WHERE user_id = %s
                 """,
-                (settings.speech_rate, settings.voice_type, settings.language, settings.user_id)
+                (settings.speech_rate, settings.voice_type, settings.haptic_vibration, settings.user_id)
             )
         else:
             # Insert
             cursor.execute(
                 """
-                INSERT INTO settings (user_id, speech_rate, voice_type, language) 
+                INSERT INTO settings (user_id, speech_rate, voice_type, haptic_vibration) 
                 VALUES (%s, %s, %s, %s)
                 """,
-                (settings.user_id, settings.speech_rate, settings.voice_type, settings.language)
+                (settings.user_id, settings.speech_rate, settings.voice_type, settings.haptic_vibration)
             )
             
         connection.commit()
