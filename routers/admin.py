@@ -7,6 +7,31 @@ from datetime import datetime, timedelta
 
 router = APIRouter()
 
+
+# ---------------------------------------------------------------------------
+# FR 35 — Audit Log Helper
+# ---------------------------------------------------------------------------
+def _insert_audit_log(action_type: str, target_user_id: int, target_username: str):
+    """Insert a single immutable audit log entry. Fire-and-forget; errors are
+    swallowed so that a logging failure never breaks the main request."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO audit_logs (action_type, target_user_id, target_username) "
+            "VALUES (%s, %s, %s)",
+            (action_type, target_user_id, target_username),
+        )
+        conn.commit()
+    except Exception:
+        pass  # Logging must never disrupt the primary operation
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except Exception:
+            pass
+
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "infox-admin-secret")
@@ -143,6 +168,9 @@ def get_user_detail(user_id: int, admin=Depends(verify_admin_token)):
         cursor.execute("SELECT * FROM settings WHERE user_id = %s", (user_id,))
         settings = cursor.fetchone()
 
+        # FR 35 — Log the view action
+        _insert_audit_log("VIEW_USER", user["user_id"], user["username"])
+
         return {"user": user, "settings": settings}
     finally:
         cursor.close()
@@ -152,14 +180,22 @@ def get_user_detail(user_id: int, admin=Depends(verify_admin_token)):
 @router.delete("/users/{user_id}")
 def delete_user(user_id: int, admin=Depends(verify_admin_token)):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
-        if not cursor.fetchone():
+        # Fetch username snapshot before deletion for the audit log
+        cursor.execute(
+            "SELECT user_id, username FROM users WHERE user_id = %s", (user_id,)
+        )
+        user = cursor.fetchone()
+        if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         cursor.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
         conn.commit()
+
+        # FR 35 — Log the delete action (after successful deletion)
+        _insert_audit_log("DELETE_USER", user["user_id"], user["username"])
+
         return {"success": True, "message": "User deleted successfully"}
     finally:
         cursor.close()
@@ -176,6 +212,41 @@ def get_user_settings(user_id: int, admin=Depends(verify_admin_token)):
         if not settings:
             return {"message": "No settings configured", "settings": None}
         return {"settings": settings}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# FR 35 — Audit Log Retrieval
+# ---------------------------------------------------------------------------
+@router.get("/audit-logs")
+def get_audit_logs(
+    page: int = 1,
+    per_page: int = 20,
+    admin=Depends(verify_admin_token),
+):
+    """Return a paginated list of all admin audit log entries."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT COUNT(*) as total FROM audit_logs")
+        total = cursor.fetchone()["total"]
+
+        offset = (page - 1) * per_page
+        cursor.execute(
+            "SELECT log_id, action_type, target_user_id, target_username, timestamp "
+            "FROM audit_logs ORDER BY timestamp DESC LIMIT %s OFFSET %s",
+            (per_page, offset),
+        )
+        logs = cursor.fetchall()
+
+        # Serialise datetime objects
+        for log in logs:
+            if isinstance(log.get("timestamp"), datetime):
+                log["timestamp"] = log["timestamp"].isoformat()
+
+        return {"total": total, "page": page, "per_page": per_page, "logs": logs}
     finally:
         cursor.close()
         conn.close()

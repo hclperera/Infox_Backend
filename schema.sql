@@ -17,6 +17,38 @@ CREATE TABLE IF NOT EXISTS settings (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
+-- ============================================================
+-- FR 35: Audit Logs
+-- Tracks all admin actions (VIEW_USER, DELETE_USER).
+-- No admin_id column — single hardcoded admin account.
+-- No before/after states — logs only who was acted upon.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS audit_logs (
+    log_id        INT PRIMARY KEY AUTO_INCREMENT,
+    action_type   VARCHAR(50)  NOT NULL,           -- 'VIEW_USER' | 'DELETE_USER'
+    target_user_id INT         NOT NULL,            -- ID of the user acted upon
+    target_username VARCHAR(100) NOT NULL,          -- Username snapshot at time of action
+    timestamp     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Immutability: block any UPDATE on audit_logs
+DELIMITER //
+CREATE TRIGGER prevent_audit_log_update
+BEFORE UPDATE ON audit_logs
+FOR EACH ROW BEGIN
+    SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Audit logs are immutable and cannot be modified.';
+END //
+
+-- Immutability: block any DELETE on audit_logs
+CREATE TRIGGER prevent_audit_log_delete
+BEFORE DELETE ON audit_logs
+FOR EACH ROW BEGIN
+    SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Audit logs are immutable and cannot be deleted.';
+END //
+DELIMITER ;
+
 /*
 -- Create Document Table
 CREATE TABLE IF NOT EXISTS documents (
