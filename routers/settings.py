@@ -17,7 +17,7 @@ def get_settings(user_id: int):
             # Return default settings if none exist yet
             return {
                 "user_id": user_id,
-                "speech_rate": 1.0,
+                "speech_rate": 0.5,
                 "voice_type": "Female",
                 "haptic_vibration": True
             }
