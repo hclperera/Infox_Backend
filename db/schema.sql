@@ -52,8 +52,6 @@ DELIMITER ;
 -- ============================================================
 -- Scans Table
 -- One row per uploaded braille image.
--- image_path  → permanent file path on the server
--- status      → 'pending' | 'done' | 'failed'
 -- ============================================================
 CREATE TABLE IF NOT EXISTS scans (
     scan_id          INT PRIMARY KEY AUTO_INCREMENT,
@@ -65,3 +63,33 @@ CREATE TABLE IF NOT EXISTS scans (
     created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
+
+/*
+-- Create Document Table
+CREATE TABLE IF NOT EXISTS documents (
+    doc_id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- Create Image Table
+CREATE TABLE IF NOT EXISTS images (
+    image_id INT PRIMARY KEY AUTO_INCREMENT,
+    doc_id INT NOT NULL,
+    image_path VARCHAR(255) NOT NULL,
+    uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+
+-- Create Processing_Result Table
+CREATE TABLE IF NOT EXISTS processing_results (
+    result_id INT PRIMARY KEY AUTO_INCREMENT,
+    image_id INT NOT NULL,
+    binary_matrix TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    confidence_score DECIMAL(5,2) NOT NULL,
+    FOREIGN KEY (image_id) REFERENCES images(image_id) ON DELETE CASCADE
+);
+*/
