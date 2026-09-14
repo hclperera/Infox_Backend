@@ -23,3 +23,4 @@ ultralytics
 sahi
 opencv-python
 numpy
+python-multipart
