@@ -73,8 +73,8 @@ CONSONANTS = {
     "111010": "ර",
     "111000": "ල",
     "111001": "ව",
-    "100101": "ශ",
-    "111101": "ෂ",
+    "100101": "ෂ",
+    "111101": "ශ",
     "011100": "ස",
     "110010": "හ",
     "000111": "ළ",
@@ -122,6 +122,19 @@ def translate_codes(codes: list) -> str:
 
     while i < len(codes):
         code = codes[i]
+
+        if code in ["001001", "000001"]:
+            count = 1
+            while i + count < len(codes) and codes[i + count] == code:
+                count += 1
+            if count > 1:
+                result.append("-" * count)
+                number_mode = False
+                sanyaka_mode = False
+                virama_mode = False
+                last_was_cons = False
+                i += count
+                continue
 
         if code == "\n":
             result.append("\n")
@@ -196,6 +209,20 @@ def translate_codes(codes: list) -> str:
             last_was_cons = False
             i += 1
             continue
+
+        if code == "010010":
+            # Context-aware check: Colon usually appears at end of text or before space/newline
+            is_colon = False
+            if i + 1 >= len(codes):
+                is_colon = True
+            elif codes[i+1] in [WORD_SPACE, "\n"]:
+                is_colon = True
+                
+            if is_colon:
+                result.append(":")
+                last_was_cons = False
+                i += 1
+                continue
 
         if code in CONSONANTS:
             char = CONSONANTS[code]
