@@ -3,7 +3,7 @@
 If you ever need to move this backend to a brand new Ubuntu Linux VM, follow these exact steps to recreate the environment perfectly.
 
 > [!IMPORTANT]
-> This guide reflects the **current production setup** as of 4th September 2026.
+> This guide reflects the **current production setup** as of 22nd September 2026.
 > The domain `server.projectinfox.tech` is used instead of a raw IP. HTTPS is handled end-to-end using a Cloudflare Origin Certificate with SSL mode "Full (Strict)". Nginx acts as a reverse proxy on ports 80 and 443.
 
 ---
@@ -203,8 +203,6 @@ Nginx sits in front of FastAPI, handles ports 80 and 443, and terminates SSL usi
 
 > [!IMPORTANT]
 > The `/scan` location block uses extended timeouts and a larger upload limit. This is required because the ML pipeline (YOLO page detection + dot segmentation) can take up to 90 seconds, and the Flutter app sends full-resolution JPEG images that can exceed Nginx's default 1MB body limit.
->
-> **Note:** The `/scan` endpoint is not yet implemented — this config is pre-configured so Nginx is ready when it is built.
 
 ```bash
 sudo tee /etc/nginx/sites-available/server.projectinfox.tech > /dev/null << 'EOF'
@@ -395,7 +393,7 @@ allow_origins=[
 - [ ] Add `admin.projectinfox.tech` custom domain in Vercel
 - [ ] Verify: `https://server.projectinfox.tech` returns `{"status": "InfoX API is online and modular!"}`
 - [ ] Verify: `https://admin.projectinfox.tech` login works
-- [ ] **[When /scan is built]** Test `POST /scan` with a sample JPEG — confirm 200 response within 90s
+- [ ] Test `POST /scan` with a sample JPEG — confirm 200 response within 90s
 
 ### You are done! 🎉
 

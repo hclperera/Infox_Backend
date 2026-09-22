@@ -4,7 +4,7 @@ import shutil
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status, BackgroundTasks
 
 from database import get_db_connection
 
@@ -159,12 +159,52 @@ def _update_scan_error(scan_id: int, error_message: str) -> None:
             pass
 
 
+def process_scan_task(scan_id: int, image_path: str):
+    """
+    Background task to run the ML pipeline and update the database record.
+    """
+    current_step = "initialization"
+    try:
+        logger.info("[Scan %s] Starting ML pipeline on %s", scan_id, image_path)
+
+        # --- Person 2: Vision stages (page crop + dot detection) ---
+        current_step = "vision_stages"
+        from services.segmentation import run_vision_stages
+        vision_result = run_vision_stages(image_path)
+
+        # --- Person 3: Spatial grouping of dots into braille codes ---
+        current_step = "grouping"
+        from services.grouping import group_dots
+        braille_codes = group_dots(
+            vision_result["yolo_outputs"],
+            vision_result["img_width"],
+            vision_result["img_height"],
+        )
+
+        # --- Person 4: Translate braille codes to Sinhala text ---
+        current_step = "translation"
+        from services.translation import translate_codes
+        sinhala_text = translate_codes(braille_codes)
+
+        logger.info("[Scan %s] Pipeline complete. Output length: %s chars", scan_id, len(sinhala_text))
+        
+        # Persist the result and mark scan as 'done'
+        _update_scan_done(scan_id, sinhala_text)
+
+    except Exception as pipeline_err:
+        error_msg = f"Failed at {current_step}: {str(pipeline_err)}"
+        logger.error("[Scan %s] ML pipeline failed: %s", scan_id, error_msg, exc_info=True)
+        # Best-effort: record the failure in the DB
+        _update_scan_error(scan_id, error_msg)
+
+
 # ---------------------------------------------------------------------------
 # Main endpoint
 # ---------------------------------------------------------------------------
 
 @router.post("/scan", status_code=status.HTTP_201_CREATED)
 async def scan_braille_image(
+    background_tasks: BackgroundTasks,
     user_id: int = Form(..., description="ID of the authenticated app user"),
     file: UploadFile = File(..., description="JPEG image of the braille page"),
 ):
@@ -176,12 +216,8 @@ async def scan_braille_image(
       1. Validate user exists in DB.
       2. Save the uploaded image permanently to disk.
       3. Insert a 'pending' scan record in the DB.
-      4. Run the ML pipeline (Person 2 → Person 3 → Person 4).
-      5. Update the scan record with the translated text and status 'done'.
-      6. Return the result to the Flutter app.
-
-    On any ML pipeline failure the scan record is marked 'error' and
-    HTTP 500 is returned.
+      4. Schedule the ML pipeline to run in the background.
+      5. Return a 'pending' status immediately.
     """
 
     # ------------------------------------------------------------------
@@ -200,52 +236,49 @@ async def scan_braille_image(
     scan_id = _insert_scan_record(user_id, image_path)
 
     # ------------------------------------------------------------------
-    # Step 4: Run the ML pipeline
+    # Step 4: Schedule the ML pipeline in the background
     # ------------------------------------------------------------------
-    try:
-        logger.info("[Scan %s] Starting ML pipeline on %s", scan_id, image_path)
-
-        # --- Person 2: Vision stages (page crop + dot detection) ---
-        from services.segmentation import run_vision_stages
-        vision_result = run_vision_stages(image_path)
-
-        # --- Person 3: Spatial grouping of dots into braille codes ---
-        from services.grouping import group_dots
-        braille_codes = group_dots(
-            vision_result["yolo_outputs"],
-            vision_result["img_width"],
-            vision_result["img_height"],
-        )
-
-        # --- Person 4: Translate braille codes to Sinhala text ---
-        from services.translation import translate_codes
-        sinhala_text = translate_codes(braille_codes)
-
-        logger.info("[Scan %s] Pipeline complete. Output length: %s chars", scan_id, len(sinhala_text))
-
-    except HTTPException:
-        raise  # Already a well-formed HTTP error; let FastAPI handle it
-    except Exception as pipeline_err:
-        error_msg = str(pipeline_err)
-        logger.error("[Scan %s] ML pipeline failed: %s", scan_id, error_msg, exc_info=True)
-        # Best-effort: record the failure in the DB
-        _update_scan_error(scan_id, error_msg)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"ML pipeline failed: {error_msg}",
-        )
+    background_tasks.add_task(process_scan_task, scan_id, image_path)
 
     # ------------------------------------------------------------------
-    # Step 5: Persist the result and mark scan as 'done'
-    # ------------------------------------------------------------------
-    _update_scan_done(scan_id, sinhala_text)
-
-    # ------------------------------------------------------------------
-    # Step 6: Return the response to the Flutter app
+    # Step 5: Return 'pending' immediately to the Flutter app
     # ------------------------------------------------------------------
     return {
         "success": True,
         "scan_id": scan_id,
-        "status": "done",
-        "translated_text": sinhala_text,
+        "status": "pending"
     }
+
+
+@router.get("/scan/{scan_id}")
+async def get_scan_status(scan_id: int):
+    """
+    GET /scan/{scan_id}
+    -------------------
+    Retrieves the status of a specific scan.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT scan_id, status, translated_text, error_message FROM scans WHERE scan_id = %s",
+            (scan_id,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Scan ID {scan_id} not found."
+            )
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("DB error while fetching scan %s: %s", scan_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error while fetching scan."
+        )
+    finally:
+        cursor.close()
+        conn.close()
