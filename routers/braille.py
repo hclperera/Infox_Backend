@@ -2,6 +2,9 @@ import os
 import uuid
 import shutil
 import logging
+import json
+from pathlib import Path
+
 from datetime import datetime
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status, BackgroundTasks
@@ -171,6 +174,23 @@ def process_scan_task(scan_id: int, image_path: str):
         current_step = "vision_stages"
         from services.segmentation import run_vision_stages
         vision_result = run_vision_stages(image_path)
+
+        # Save detections BEFORE grouping so they survive a grouping failure.
+        current_step = "save_debug_detections"
+        debug_path = Path(image_path).with_suffix(".detections.json")
+        debug_path.write_text(
+            json.dumps({
+                "yolo_outputs": vision_result["yolo_outputs"],
+                "img_width": vision_result["img_width"],
+                "img_height": vision_result["img_height"],
+            }, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "[Scan %s] Detections saved to: %s",
+            scan_id,
+            debug_path.resolve(),
+        )
 
         # --- Person 3: Spatial grouping of dots into braille codes ---
         current_step = "grouping"
