@@ -1,233 +1,250 @@
-import math
-import logging
-import numpy as np
+"""Regular six-dot lattice reconstruction with explicit calibration and diagnostics.
 
+Requires numpy and scipy. Coordinates are normalized YOLO class,x,y,w,h[,score].
+The public group_dots signature is unchanged. Use group_dots_detailed to inspect
+uncertainty. Curled/perspective-distorted pages need rectification first.
+"""
+from dataclasses import dataclass, asdict
 import os
+import numpy as np
+from scipy.spatial import cKDTree
+
+
+@dataclass
+class GridConfig:
+    front_class_id: int = 2
+    angle_degrees: float | None = None
+    column_spacing: float | None = None
+    row_spacing: float | None = None
+    cell_pitch: float | None = None
+    line_pitch: float | None = None
+    x_origin: float | None = None
+    y_origin: float | None = None
+    tolerance: float = 0.28
+    max_aspect_ratio: float = 2.2
+    max_cells_per_line: int = 300
+
+
+def _clusters(values, tolerance):
+    groups = []
+    for v in sorted(values):
+        if not groups or v - np.mean(groups[-1]) > tolerance:
+            groups.append([float(v)])
+        else:
+            groups[-1].append(float(v))
+    return np.array([np.median(g) for g in groups])
+
+
+def _angle(points, diameter):
+    if len(points) < 6:
+        return 0.0
+    tree = cKDTree(points)
+    _, inds = tree.query(points, k=min(18, len(points)))
+    a = []
+    for i, neighbors in enumerate(inds):
+        delta = points[neighbors[1:]] - points[i]
+        for dx, dy in delta:
+            if dx > diameter and abs(dy / dx) < np.tan(np.deg2rad(15)):
+                a.append(np.rad2deg(np.arctan2(dy, dx)))
+    if not a:
+        return 0.0
+    counts, edges = np.histogram(a, bins=np.arange(-15, 15.101, .1))
+    center = (edges[np.argmax(counts)] + edges[np.argmax(counts)+1])/2
+    near = np.array(a)[np.abs(np.array(a)-center) < .2]
+    return float(np.median(near))
+
+
+def _assign(values, origin, spacing, pitch, slots):
+    k = np.arange(slots)
+    indices = np.rint((values[:, None] - origin - k*spacing)/pitch).astype(int)
+    errors = values[:, None] - (origin + indices*pitch + k*spacing)
+    slot = np.argmin(np.abs(errors), axis=1)
+    ix = np.arange(len(values))
+    return indices[ix, slot], slot, errors[ix, slot]
+
+
+def _fit_axis(values, slots, diameter, spacing=None, pitch=None, origin=None):
+    spacing_given = spacing is not None
+    levels = _clusters(values, diameter * .45)
+    gaps = np.diff(levels)
+    if spacing is None:
+        if len(gaps) < slots:
+            raise ValueError('Too little grid evidence; supply spacing, pitch and origin calibration')
+        spacing = float(np.percentile(gaps, 20))
+    if spacing <= 0 or not np.isfinite(spacing):
+        raise ValueError('Grid spacing must be positive and finite')
+    if pitch is not None and (not np.isfinite(pitch) or pitch <= (slots-1)*spacing):
+        raise ValueError('Grid pitch must exceed the span of its dot slots')
+    if origin is not None and not np.isfinite(origin):
+        raise ValueError('Grid origin must be finite')
+    # Candidate periods come from actual level differences, not box widths.
+    if pitch is None:
+        low, high = ((2.05, 3.5) if slots == 2 else (3.1, 6.0))
+        differences = []
+        for step in range(1, min(7, len(levels))):
+            ds = levels[step:] - levels[:-step]
+            differences.extend(ds[(ds > low*spacing) & (ds < high*spacing)])
+        if not differences:
+            raise ValueError('Cannot infer grid pitch; provide calibration')
+        ds = np.array(differences)
+        bins = np.round(ds/(spacing*.04)).astype(int)
+        candidates = sorted(set(bins), key=lambda b: -np.sum(bins == b))[:14]
+        pitches = [float(np.median(ds[bins == b])) for b in candidates]
+    else:
+        pitches = [float(pitch)]
+    sample = levels if len(levels) <= 160 else levels[np.linspace(0, len(levels)-1, 160).astype(int)]
+    trials = []
+    for period in pitches:
+        origins = [origin] if origin is not None else [v-s*spacing for v in levels[:24] for s in range(slots)]
+        for start in origins:
+            n, s, err = _assign(sample, start, spacing, period, slots)
+            score = np.mean(np.minimum((err/spacing)**2, .25))
+            trials.append((score, float(start), spacing, period))
+    # Refine several starts by alternating assignments and least squares.
+    best = None
+    for _, start, gap, period in sorted(trials)[:16]:
+        for _ in range(8):
+            n, s, err = _assign(sample, start, gap, period, slots)
+            keep = np.abs(err) < gap*.40
+            if np.sum(keep) < 4:
+                break
+            cols, fixed, names = [], np.zeros(np.sum(keep)), []
+            for name, col, known, val in [('o', np.ones(np.sum(keep)), origin, start),
+                                          ('d', s[keep], spacing if spacing_given else None, gap),
+                                          ('p', n[keep], pitch, period)]:
+                if known is None:
+                    cols.append(col); names.append(name)
+                else:
+                    fixed += col*known
+            if cols:
+                matrix = np.array(cols).T
+                if np.linalg.matrix_rank(matrix) < len(cols):
+                    break
+                sol = np.linalg.lstsq(matrix, sample[keep]-fixed, rcond=None)[0]
+                fit = dict(zip(names, sol))
+                new_start, new_gap, new_period = fit.get('o', start), fit.get('d', gap), fit.get('p', period)
+                if new_gap <= 0 or new_period <= (slots-1)*new_gap or abs(new_gap/spacing-1) > .35:
+                    break
+                start, gap, period = new_start, new_gap, new_period
+        n, s, err = _assign(sample, start, gap, period, slots)
+        score = float(np.mean(np.minimum((err/gap)**2, .25)))
+        if best is None or score < best[0]:
+            best = (score, float(start), float(gap), float(period))
+    score, start, gap, period = best
+    _, used_slots, _ = _assign(sample, start, gap, period, slots)
+    if origin is None and len(set(used_slots)) < slots:
+        raise ValueError('Missing complete row/column evidence; origin is ambiguous. Supply calibration')
+    return start, gap, period, score
+
+
+def group_dots_detailed(yolo_outputs, img_width, img_height, *, config=None):
+    cfg = config or GridConfig(front_class_id=int(os.getenv('FRONT_CLASS_ID', '2')))
+    if img_width <= 0 or img_height <= 0:
+        raise ValueError('Image dimensions must be positive')
+    if not 0 < cfg.tolerance < .5:
+        raise ValueError('Grid tolerance must lie between 0 and 0.5')
+    warnings, rejected, records = [], [], []
+    other_centers = []
+    for idx, row in enumerate(yolo_outputs):
+        if len(row) not in (5, 6):
+            raise ValueError(f'Detection {idx} must have 5 or 6 values')
+        a = np.asarray(row, dtype=float)
+        if not np.all(np.isfinite(a)) or a[0] != int(a[0]) or not (0 <= a[1] <= 1 and 0 <= a[2] <= 1) or not (0 < a[3] <= 1 and 0 < a[4] <= 1) or (len(a) == 6 and not 0 <= a[5] <= 1):
+            rejected.append({'index': idx, 'reason': 'invalid detection'})
+            continue
+        if int(a[0]) != cfg.front_class_id:
+            other_centers.append([a[1]*img_width, a[2]*img_height])
+            continue
+        w, h = a[3]*img_width, a[4]*img_height
+        if max(w,h)/min(w,h) > cfg.max_aspect_ratio:
+            rejected.append({'index': idx, 'reason': 'aspect ratio'})
+            continue
+        records.append([a[1]*img_width, a[2]*img_height, w, h, a[5] if len(a)==6 else 1., idx])
+    if not records:
+        return {'codes': [], 'cells': [], 'warnings': ['No front dots'], 'rejected': rejected, 'grid': None}
+    data = np.array(records)
+    diameter = float(np.median(np.sqrt(data[:,2]*data[:,3])))
+    if other_centers:
+        distances, _ = cKDTree(other_centers).query(data[:,:2], k=1)
+        conflicts = int(np.sum(distances < .35*diameter))
+        if conflicts:
+            warnings.append(f'{conflicts} front detections have near-coincident other-class detections; inspect classification')
+    # Broad scale-relative rejection; never shrink a box to manufacture a dot.
+    ok = (np.sqrt(data[:,2]*data[:,3]) >= diameter*.35) & (np.sqrt(data[:,2]*data[:,3]) <= diameter*3.5)
+    for r in data[~ok]:
+        rejected.append({'index': int(r[5]), 'reason': 'relative size outlier'})
+    data = data[ok]
+    if not len(data):
+        raise ValueError('All front detections failed relative-size filtering')
+    # Same-class duplicates only. Highest confidence wins; area breaks ties.
+    order = sorted(range(len(data)), key=lambda j: (-data[j,4], data[j,2]*data[j,3]))
+    tree = cKDTree(data[:,:2]); suppressed, kept = set(), []
+    for j in order:
+        if j in suppressed:
+            rejected.append({'index': int(data[j,5]), 'reason': 'same-class duplicate'})
+            continue
+        kept.append(j)
+        suppressed.update(k for k in tree.query_ball_point(data[j,:2], .35*diameter) if k != j)
+    data = data[kept]
+    angle = cfg.angle_degrees if cfg.angle_degrees is not None else _angle(data[:,:2], diameter)
+    if not np.isfinite(angle):
+        raise ValueError('Grid angle must be finite')
+    theta = np.deg2rad(angle)
+    # Coordinates rotate around (0,0); calibration origins use this frame.
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    flat = data[:,:2] @ rotation
+    x0, dx, px, xs = _fit_axis(flat[:,0], 2, diameter, cfg.column_spacing, cfg.cell_pitch, cfg.x_origin)
+    y0, dy, py, ys = _fit_axis(flat[:,1], 3, diameter, cfg.row_spacing, cfg.line_pitch, cfg.y_origin)
+    ci, col, ex = _assign(flat[:,0], x0, dx, px, 2)
+    li, row, ey = _assign(flat[:,1], y0, dy, py, 3)
+    good = (np.abs(ex) <= dx*cfg.tolerance) & (np.abs(ey) <= dy*cfg.tolerance)
+    if np.mean(good) < .80:
+        raise ValueError('Poor regular-grid fit (<80% of dots). Check rectification, class ID or calibration')
+    if cfg.x_origin is None or cfg.y_origin is None:
+        warnings.append('Automatically inferred lattice; verify its overlay before trusting sparse text')
+    if np.any(~good):
+        warnings.append(f'{int(np.sum(~good))} off-grid detections excluded; inspect rejected dots')
+    cells = {}
+    for j in range(len(data)):
+        if not good[j]:
+            rejected.append({'index': int(data[j,5]), 'reason': 'off grid', 'residual': [float(ex[j]), float(ey[j])]})
+            continue
+        key = (int(li[j]), int(ci[j]))
+        cell = cells.setdefault(key, {'bits': [0]*6, 'detections': [], 'scores': [], 'residuals': []})
+        bit = int(col[j]*3 + row[j])
+        cell['bits'][bit] = 1
+        cell['detections'].append(int(data[j,5]))
+        cell['scores'].append(float(data[j,4]))
+        cell['residuals'].append([float(ex[j]), float(ey[j])])
+    codes, output_cells = [], []
+    if cells:
+        min_line, max_line = min(k[0] for k in cells), max(k[0] for k in cells)
+        if max_line-min_line > 500:
+            raise ValueError('Implausible line count')
+        for line in range(min_line, max_line+1):
+            occupied = [k[1] for k in cells if k[0] == line]
+            if occupied:
+                lo, hi = min(occupied), max(occupied)
+                if hi-lo+1 > cfg.max_cells_per_line:
+                    raise ValueError('Implausible cell count; verify pitch')
+                for c in range(lo,hi+1):
+                    entry = cells.get((line,c))
+                    code = ''.join(map(str,entry['bits'])) if entry else '000000'
+                    # Return predicted original-image dot positions for an overlay.
+                    sites = np.array([[x0+c*px+column*dx, y0+line*py+r*dy] for column in range(2) for r in range(3)]) @ rotation.T
+                    output_cells.append({'line': line-min_line, 'column': c-lo, 'grid_column': c,
+                        'code': code, 'token_index': len(codes), 'sites': sites.tolist(),
+                        'detections': entry['detections'] if entry else [],
+                        'min_score': min(entry['scores']) if entry else None,
+                        'residuals': entry['residuals'] if entry else []})
+                    codes.append(code)
+            codes.append('\n')
+    return {'codes': codes, 'cells': output_cells, 'warnings': warnings, 'rejected': rejected,
+            'grid': {'angle_degrees': float(angle), 'x_origin': x0, 'y_origin': y0,
+                     'column_spacing': dx, 'row_spacing': dy, 'cell_pitch': px, 'line_pitch': py,
+                     'x_fit_error': xs, 'y_fit_error': ys, 'accepted_fraction': float(np.mean(good))},
+            'config': asdict(cfg)}
+
 
 def group_dots(yolo_outputs: list, img_width: int, img_height: int) -> list:
-    """
-    Person 1 calls this.
-    Takes raw YOLO outputs, filters them, handles slant, 
-    and groups into 6-bit binary strings.
-    """
-    if not yolo_outputs:
-        return []
-
-    # 1. Geometric Noise Filter
-    valid_dots = []
-    front_class_id = int(os.getenv("FRONT_CLASS_ID", "2"))
-    for detection in yolo_outputs:
-        class_id, x_c_norm, y_c_norm, w_norm, h_norm = detection
-        if int(class_id) != front_class_id:
-            continue
-            
-        w_px = w_norm * img_width
-        h_px = h_norm * img_height
-        area = w_px * h_px
-        aspect_ratio = max(w_px, h_px) / min(w_px, h_px) if min(w_px, h_px) > 0 else 0
-        
-        if 80 <= area <= 12000 and aspect_ratio <= 2.2:
-            valid_dots.append([x_c_norm, y_c_norm, w_norm, h_norm])
-
-    if not valid_dots:
-        return []
-
-    raw_pixel_dots = []
-    widths, heights = [], []
-    
-    for dot in valid_dots:
-        x_px, y_px = dot[0] * img_width, dot[1] * img_height
-        widths.append(dot[2] * img_width)
-        heights.append(dot[3] * img_height)
-        raw_pixel_dots.append([x_px, y_px])
-        
-    median_w, median_h = np.median(widths), np.median(heights)
-    
-    # 2. Detect Slant
-    angles = []
-    for i, dot1 in enumerate(raw_pixel_dots):
-        for j, dot2 in enumerate(raw_pixel_dots):
-            if i == j: continue
-            dx = dot2[0] - dot1[0]
-            dy = dot2[1] - dot1[1]
-            if 0 < dx < (median_w * 10):
-                angle = math.degrees(math.atan2(dy, dx))
-                if -15 < angle < 15:
-                    angles.append(angle)
-    
-    # Guard: if too few dots for reliable angle estimation, skip slant correction
-    if len(raw_pixel_dots) < 5:
-        angles = []
-                    
-    # 3. Apply Virtual Rotation (Centered)
-    rotated_dots = []
-    if angles:
-        page_slant = np.median(angles)
-        logging.debug(f"Detected page slant: {page_slant:.2f} degrees. Flattening coordinates...")
-        theta = math.radians(-page_slant)
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        
-        # Rotate around the center of the image
-        cx = img_width / 2.0
-        cy = img_height / 2.0
-        
-        for idx, (x, y) in enumerate(raw_pixel_dots):
-            dx = x - cx
-            dy = y - cy
-            x_rot = dx * cos_t - dy * sin_t + cx
-            y_rot = dx * sin_t + dy * cos_t + cy
-            rotated_dots.append([x_rot, y_rot, x, y])
-    else:
-        logging.debug("No significant slant detected.")
-        rotated_dots = [[x, y, x, y] for x, y in raw_pixel_dots]
-
-    # 4. Line Grouping
-    rotated_dots.sort(key=lambda d: d[1])
-    lines = []
-    current_line = [rotated_dots[0]]
-    
-    for i in range(1, len(rotated_dots)):
-        y_dist_prev = abs(rotated_dots[i][1] - current_line[-1][1])
-        y_dist_first = abs(rotated_dots[i][1] - current_line[0][1])
-        
-        if y_dist_prev < (median_h * 2.0) and y_dist_first < (median_h * 4.0):
-            current_line.append(rotated_dots[i])
-        else:
-            lines.append(current_line)
-            current_line = [rotated_dots[i]]
-    lines.append(current_line)
-    
-    logging.debug(f"Lines detected: {len(lines)}")
-    
-    # Calculate intra-line horizontal gaps for cell boundary detection
-    all_gaps = []
-    for line in lines:
-        line.sort(key=lambda d: d[0])
-        for i in range(1, len(line)):
-            gap = line[i][0] - line[i-1][0]
-            if gap > (median_w * 0.2): 
-                all_gaps.append(gap)
-    
-    if all_gaps:
-        gaps_arr = np.array(all_gaps)
-        cell_boundary = np.percentile(gaps_arr, 25) * 1.25
-    else:
-        cell_boundary = median_w * 1.5
-    
-    max_cell_width = cell_boundary
-    logging.debug(f"Cell boundary threshold: {max_cell_width:.1f}px")
-
-    six_bit_codes = []
-    
-    # Calculate global cell pitch to accurately detect spaces and missing columns
-    all_cell_dists = []
-    for line in lines:
-        current_cell = [line[0]]
-        raw_cells = []
-        for i in range(1, len(line)):
-            gap = line[i][0] - line[i-1][0]
-            if gap < max_cell_width and (line[i][0] - current_cell[0][0]) < max_cell_width:
-                current_cell.append(line[i])
-            else:
-                raw_cells.append(current_cell)
-                current_cell = [line[i]]
-        raw_cells.append(current_cell)
-        
-        for i in range(1, len(raw_cells)):
-            dist = raw_cells[i][0][0] - raw_cells[i-1][0][0]
-            if dist < max_cell_width * 3.0:  # Exclude obvious word spaces
-                all_cell_dists.append(dist)
-                
-    pitch = np.median(all_cell_dists) if all_cell_dists else median_w * 2.5
-    logging.debug(f"Calculated Global Cell Pitch: {pitch:.1f}px")
-    
-    # 5. Horizontal Cell Grouping
-    for line in lines:
-        current_cell = [line[0]]
-        raw_cells = []
-        for i in range(1, len(line)):
-            gap = line[i][0] - line[i-1][0]
-            if gap < max_cell_width and (line[i][0] - current_cell[0][0]) < max_cell_width:
-                current_cell.append(line[i])
-            else:
-                raw_cells.append(current_cell)
-                current_cell = [line[i]]
-        raw_cells.append(current_cell)
-        
-        cells = [raw_cells[0]]
-        for i in range(1, len(raw_cells)):
-            dist = raw_cells[i][0][0] - raw_cells[i-1][0][0]
-            num_spaces = int(round(dist / pitch)) - 1
-            for _ in range(max(0, num_spaces)):
-                cells.append("SPACE")
-            cells.append(raw_cells[i])
-        
-        prev_left_x = None
-        for cell in cells:
-            if cell == "SPACE":
-                six_bit_codes.append("000000")
-                if prev_left_x is not None:
-                    prev_left_x += pitch
-                continue
-                
-            cell.sort(key=lambda d: d[0])
-            cell_width = max(d[0] for d in cell) - min(d[0] for d in cell)
-            
-            if prev_left_x is None:
-                prev_left_x = cell[0][0]
-            else:
-                steps = round((cell[0][0] - prev_left_x) / pitch)
-                prev_left_x += steps * pitch
-            
-            if cell_width > (median_w * 0.6):
-                cell_mean_x = np.mean([d[0] for d in cell])
-                left_col = [d for d in cell if d[0] < cell_mean_x]
-                right_col = [d for d in cell if d[0] >= cell_mean_x]
-                prev_left_x = cell[0][0] # Realignment
-            else:
-                # Single column cell
-                if (cell[0][0] - prev_left_x) > (pitch * 0.3):
-                    left_col = []
-                    right_col = cell
-                else:
-                    left_col = cell
-                    right_col = []
-                    prev_left_x = cell[0][0] # Realignment
-            
-            # Localized Row Detection
-            cell_mean_x = np.mean([d[0] for d in cell])
-            local_dots = [d for d in line if abs(d[0] - cell_mean_x) < pitch * 3]
-            if not local_dots: local_dots = cell
-            
-            local_y_min = min(d[1] for d in local_dots)
-            local_y_max = max(d[1] for d in local_dots)
-            local_y_range = local_y_max - local_y_min
-            
-            if local_y_range > (median_h * 1.5):
-                row_boundary_top = local_y_min + local_y_range / 3
-                row_boundary_bot = local_y_min + 2 * local_y_range / 3
-            else:
-                local_mean_y = np.mean([d[1] for d in local_dots])
-                row_boundary_top = local_mean_y - (median_h * 0.5)
-                row_boundary_bot = local_mean_y + (median_h * 0.5)
-            
-            binary_code = [0] * 6
-            
-            for dot in left_col:
-                if dot[1] < row_boundary_top: binary_code[0] = 1
-                elif dot[1] > row_boundary_bot: binary_code[2] = 1
-                else: binary_code[1] = 1
-                
-            for dot in right_col:
-                if dot[1] < row_boundary_top: binary_code[3] = 1
-                elif dot[1] > row_boundary_bot: binary_code[5] = 1
-                else: binary_code[4] = 1
-                
-            code_str = "".join(map(str, binary_code))
-            six_bit_codes.append(code_str)
-            
-        # Add newline at the end of each physical Braille line
-        six_bit_codes.append("\n")
-            
-    return six_bit_codes
+    return group_dots_detailed(yolo_outputs, img_width, img_height)['codes']
