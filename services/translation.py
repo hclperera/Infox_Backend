@@ -29,13 +29,11 @@ VOWEL_SIGNS = {
     "001100": "ෛ",
     "101101": "ො",
     "101010": "ෝ",
-    "010101": "ෞ",
-    "000010": "ෘ"
+    "010101": "ෞ"
 }
 
 MODIFIERS = {
-    "001000": "ං",
-    "000001": "ඃ"
+    "001000": "ං"
 }
 
 VIRAMA = "000100"
@@ -97,176 +95,168 @@ DIGITS = {
 
 PUNCTUATION = {
     "010000": ",",
-    "000011": ";",
+    "011000": ";",
     "010010": ":",
     "010011": ".",
     "011010": "!",
     "011001": "?",
-    "011011": "\"",
+    "011011": "()",
     "001011": "\"",
     "001001": "-"
 }
 
 
-def translate_codes(codes: list) -> str:
+
+# Bit order is dots 1,2,3,4,5,6 (column-major), never row-major.
+# Alphabet/punctuation cross-check: World Braille Usage 2013, pp. 134-135.
+# Ambiguous punctuation needs book-specific context; overrides are explicit.
+SANYAKA = {'ග': 'ඟ', 'ජ': 'ඦ', 'ඩ': 'ඬ', 'ද': 'ඳ', 'බ': 'ඹ'}
+
+
+def translate_detailed(codes, *, overrides=None):
+    """Return text plus indexed warnings. overrides maps token index to text.
+
+    Prefix virama follows this project's existing convention. This is an
+    uncontracted literary decoder, not a complete Sinhala/Nemeth translator.
+    Ambiguous letters default to letters and are reported, not silently guessed.
     """
-    Person 1 calls this.
-    Takes 6-bit binary strings and returns Sinhala Unicode text.
-    """
-    result = []
+    import unicodedata
+    codes = list(codes)
+    overrides = overrides or {}
+    result, warnings = [], []
+    number = consonant = paren = quote = False
     i = 0
-    number_mode   = False
-    sanyaka_mode  = False
-    virama_mode   = False
-    last_was_cons = False
+
+    def warn(index, reason):
+        warnings.append({'index': index, 'code': codes[index], 'reason': reason})
+
+    def emit_cons(char, dead=False):
+        if result and result[-1].endswith('්') and char in ('ර', 'ය'):
+            result.append('\u200d')
+        result.append(char + ('්' if dead else ''))
 
     while i < len(codes):
         code = codes[i]
-
-        if code in ["001001", "000001"]:
-            count = 1
-            while i + count < len(codes) and codes[i + count] == code:
-                count += 1
-            if count > 1:
-                result.append("-" * count)
-                number_mode = False
-                sanyaka_mode = False
-                virama_mode = False
-                last_was_cons = False
-                i += count
-                continue
-
-        if code == "\n":
-            result.append("\n")
-            number_mode = False
-            sanyaka_mode = False
-            virama_mode = False
-            last_was_cons = False
+        following = codes[i+1] if i+1 < len(codes) else None
+        if i in overrides:
+            result.append(str(overrides[i]))
+            number = consonant = False
             i += 1
             continue
-
-        if code == WORD_SPACE:
-            result.append(" ")
-            number_mode = False
-            sanyaka_mode = False
-            virama_mode = False
-            last_was_cons = False
+        if code in (WORD_SPACE, '\n'):
+            result.append(' ' if code == WORD_SPACE else '\n')
+            number = consonant = False
             i += 1
             continue
-
+        if not isinstance(code, str) or len(code) != 6 or set(code) - {'0', '1'}:
+            warn(i, 'Invalid or uncertain cell')
+            result.append('�')
+            number = consonant = False
+            i += 1
+            continue
         if code == NUM_INDICATOR:
-            if not last_was_cons and (i == 0 or codes[i-1] == WORD_SPACE or codes[i-1] == "\n"):
-                number_mode = True
-                sanyaka_mode = False
-                virama_mode = False
-                last_was_cons = False
-                i += 1
-                continue
+            number = following in DIGITS
+            consonant = False
+            if not number:
+                warn(i, 'Number sign is not followed by a digit')
+                result.append('�')
+            i += 1
+            continue
+        if number and code in DIGITS:
+            result.append(DIGITS[code])
+            i += 1
+            continue
+        number = False
+        # Sinhala visarga is dots 3-3; a single dot 3 is anusvara.
+        if code == '001000' and following == '001000' and i+1 not in overrides:
+            result.append('ඃ')
+            consonant = False
+            i += 2
+            continue
+        # Vocalic r/l use a two-cell sequence: dot 5 or 6, then r or l.
+        if code in ('000010', '000001') and following in ('111010', '111000') and i+1 not in overrides:
+            if following == '111010':
+                char = ('ෘ' if code == '000010' else 'ෲ') if consonant else ('ඍ' if code == '000010' else 'ඎ')
+            elif consonant and code == '000010':
+                char = 'ෟ'
+            elif consonant:
+                warn(i, 'Long vocalic l sign needs manual review')
+                char = '�'
             else:
-                char = "ණ"
-                sanyaka_mode = False
-                result.append(char)
-                if virama_mode:
-                    result.append("්")
-                    virama_mode = False
-                    last_was_cons = False
-                else:
-                    last_was_cons = True
-                i += 1
-                continue
-
-        if code == SANYAKA_INDICATOR:
-            sanyaka_mode = True
-            number_mode = False
-            last_was_cons = False
-            i += 1
-            continue
-
-        if number_mode:
-            char = DIGITS.get(code)
-            if char:
-                result.append(char)
-                i += 1
-                continue
-            else:
-                number_mode = False
-
-        if code == VIRAMA:
-            virama_mode = True
-            number_mode = False
-            last_was_cons = False
-            i += 1
-            continue
-
-        if last_was_cons and code in VOWEL_SIGNS:
-            result.append(VOWEL_SIGNS[code])
-            last_was_cons = False
-            i += 1
-            continue
-
-        if code in MODIFIERS:
-            result.append(MODIFIERS[code])
-            last_was_cons = False
-            i += 1
-            continue
-
-        if code == "010010":
-            # Context-aware check: Colon usually appears at end of text or before space/newline
-            is_colon = False
-            if i + 1 >= len(codes):
-                is_colon = True
-            elif codes[i+1] in [WORD_SPACE, "\n"]:
-                is_colon = True
-                
-            if is_colon:
-                result.append(":")
-                last_was_cons = False
-                i += 1
-                continue
-
-        if code in CONSONANTS:
-            char = CONSONANTS[code]
-            if sanyaka_mode:
-                if char == "ග": char = "ඟ"
-                elif char == "ඩ": char = "ඬ"
-                elif char == "ද": char = "ඳ"
-                elif char == "බ": char = "ඹ"
-                sanyaka_mode = False
-                
-            if len(result) > 0 and result[-1] == "්":
-                if char == "ර" or char == "ය":
-                    result.append("\u200D")
-                    
+                char = 'ඏ' if code == '000010' else 'ඐ'
             result.append(char)
-            
-            if virama_mode:
-                result.append("්")
-                virama_mode = False
-                last_was_cons = False
+            consonant = False
+            i += 2
+            continue
+        if code == VIRAMA:
+            # Consume only an adjacent consonant (optionally sanyaka-prefixed).
+            j = i + 1
+            nasal = j < len(codes) and codes[j] == SANYAKA_INDICATOR
+            if nasal:
+                j += 1
+            char = CONSONANTS.get(codes[j]) if j < len(codes) else None
+            if char and (not nasal or char in SANYAKA) and not any(k in overrides for k in range(i+1,j+1)):
+                emit_cons(SANYAKA[char] if nasal else char, dead=True)
+                i = j+1
             else:
-                last_was_cons = True
-                
-            i += 1
+                warn(i, 'Unresolved virama prefix; not applied to a later consonant')
+                result.append('�')
+                i += 1
+            consonant = False
             continue
-
-        if code in INDEPENDENT_VOWELS:
-            result.append(INDEPENDENT_VOWELS[code])
-            last_was_cons = False
-            i += 1
+        if code == SANYAKA_INDICATOR:
+            char = CONSONANTS.get(following)
+            if char in SANYAKA and i+1 not in overrides:
+                warn(i, 'Sanyaka/semicolon ambiguity: interpreted as sanyaka prefix')
+                emit_cons(SANYAKA[char])
+                consonant = True
+                i += 2
+            else:
+                result.append(';')
+                consonant = False
+                i += 1
             continue
-        
-        if code in VOWEL_SIGNS:
+        if consonant and code in VOWEL_SIGNS:
             result.append(VOWEL_SIGNS[code])
-            last_was_cons = False
-            i += 1
-            continue
-
-        if code in PUNCTUATION:
+            consonant = False
+        elif code in MODIFIERS:
+            result.append(MODIFIERS[code])
+            consonant = False
+        elif code == '011011':
+            result.append(')' if paren else '(')
+            paren = not paren
+            consonant = False
+        elif code == '001011' and quote:
+            result.append('”')
+            quote = False
+            consonant = False
+            warn(i, 'Closing quote/ඣ ambiguity: interpreted as closing quote')
+        elif code == '011001' and (i == 0 or codes[i-1] in (WORD_SPACE, '\n')) and '001011' in codes[i+1:]:
+            result.append('“')
+            quote = True
+            consonant = False
+            warn(i, 'Opening quote/question mark ambiguity: interpreted as opening quote')
+        elif code in CONSONANTS:
+            if code in ('010010', '001011'):
+                warn(i, 'Letter/punctuation ambiguity: kept letter; use an indexed override if needed')
+            emit_cons(CONSONANTS[code])
+            consonant = True
+        elif code in INDEPENDENT_VOWELS:
+            result.append(INDEPENDENT_VOWELS[code])
+            consonant = False
+        elif code in PUNCTUATION:
             result.append(PUNCTUATION[code])
+            consonant = False
         else:
-            result.append(f"[{code}]")
-            
-        last_was_cons = False
+            warn(i, 'Unsupported cell or detached vowel sign')
+            result.append('�')
+            consonant = False
         i += 1
+    if paren or quote:
+        warnings.append({'index': None, 'code': None, 'reason': 'Unclosed bracket or quote'})
+    return {'text': unicodedata.normalize('NFC', ''.join(result)), 'warnings': warnings}
 
-    return "".join(result)
+
+def translate_codes(codes: list) -> str:
+    """Backward-compatible pipeline entry point."""
+    return translate_detailed(codes)['text']
