@@ -4,7 +4,6 @@ import shutil
 import logging
 import json
 from pathlib import Path
-
 from datetime import datetime
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status, BackgroundTasks
@@ -17,7 +16,6 @@ from database import get_db_connection
 # (i.e., not yet implemented by teammates) doesn't crash the whole server
 # on startup.
 # ---------------------------------------------------------------------------
-from services.segmentation import run_vision_stages
 # from services.grouping    import group_dots
 # from services.translation import translate_codes
 
@@ -173,38 +171,39 @@ def process_scan_task(scan_id: int, image_path: str):
         # --- Person 2: Vision stages (page crop + dot detection) ---
         current_step = "vision_stages"
         from services.segmentation import run_vision_stages
-        vision_result = run_vision_stages(image_path)
-
-        # Save detections BEFORE grouping so they survive a grouping failure.
-        current_step = "save_debug_detections"
-        debug_path = Path(image_path).with_suffix(".detections.json")
-        debug_path.write_text(
-            json.dumps({
-                "yolo_outputs": vision_result["yolo_outputs"],
-                "img_width": vision_result["img_width"],
-                "img_height": vision_result["img_height"],
-            }, indent=2),
-            encoding="utf-8",
-        )
-        logger.info(
-            "[Scan %s] Detections saved to: %s",
-            scan_id,
-            debug_path.resolve(),
-        )
+        debug_dir = Path(os.getenv("SCAN_DEBUG_DIR", "uploads/scan_debug")) / str(scan_id)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        vision_result = run_vision_stages(image_path, debug_dir=debug_dir)
+        (debug_dir / "detections.json").write_text(
+            json.dumps(vision_result, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # --- Person 3: Spatial grouping of dots into braille codes ---
         current_step = "grouping"
-        from services.grouping import group_dots
-        braille_codes = group_dots(
+        from services.grouping import GridConfig, group_dots_detailed
+        config_path = os.getenv("BRAILLE_GRID_CONFIG")
+        config_data = json.loads(Path(config_path).read_text(encoding="utf-8")) if config_path else {}
+        config_data["front_class_id"] = vision_result["front_class_id"]
+        grouped = group_dots_detailed(
             vision_result["yolo_outputs"],
             vision_result["img_width"],
             vision_result["img_height"],
+            config=GridConfig(**config_data),
         )
+        braille_codes = grouped["codes"]
+        (debug_dir / "grouping.json").write_text(
+            json.dumps(grouped, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not braille_codes:
+            raise ValueError("No usable front-side Braille dots found")
 
         # --- Person 4: Translate braille codes to Sinhala text ---
         current_step = "translation"
-        from services.translation import translate_codes
-        sinhala_text = translate_codes(braille_codes)
+        from services.translation import translate_detailed
+        translated = translate_detailed(braille_codes)
+        sinhala_text = translated["text"]
+        (debug_dir / "translation.json").write_text(
+            json.dumps(translated, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("[Scan %s] Review warnings: grouping=%s translation=%s", scan_id,
+                    len(grouped["warnings"]), len(translated["warnings"]))
 
         logger.info("[Scan %s] Pipeline complete. Output length: %s chars", scan_id, len(sinhala_text))
         
