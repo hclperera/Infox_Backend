@@ -9,3 +9,6 @@ htmlcov/
 auto_update.log
 models/
 uploads/
+# Local images, scan exports, experiments, reports and analysis dependencies.
+/diagnostics/
+/output/
