@@ -1,6 +1,6 @@
 """Regular six-dot lattice reconstruction with explicit calibration and diagnostics.
 
-Revision 6: optional guarded bends within lines and classification recovery.
+Revision 6.2: unique slot evidence, layout preservation and quality diagnostics.
 Requires numpy and scipy. Coordinates are normalized YOLO class,x,y,w,h[,score].
 The public group_dots signature is unchanged. Use group_dots_detailed to inspect
 uncertainty. Severe curvature or perspective can still require image rectification.
@@ -11,7 +11,7 @@ import logging
 import numpy as np
 from scipy.spatial import cKDTree
 
-GROUPING_VERSION = "2026-10-08-r6"
+GROUPING_VERSION = "2026-10-18-r6.3"
 _logger = logging.getLogger(__name__)
 
 
@@ -37,15 +37,19 @@ class GridConfig:
     refine_segments: bool = False  # Guarded local bends within a refined line.
     recover_back_dots: bool = False
     back_class_id: int = 1
+    preserve_leading_spaces: bool = False
 
 
 def _clusters(values, tolerance):
     groups = []
+    running_sum = 0.
     for v in sorted(values):
-        if not groups or v - np.mean(groups[-1]) > tolerance:
+        if not groups or v - running_sum / len(groups[-1]) > tolerance:
             groups.append([float(v)])
+            running_sum = float(v)
         else:
             groups[-1].append(float(v))
+            running_sum += float(v)
     return np.array([np.median(g) for g in groups])
 
 
@@ -347,9 +351,11 @@ def _fit_warp(points, diameter, tolerance, config=None):
 
 def _warp_sites(targets, warp):
     """Invert the smooth coordinate map for diagnostic site overlays."""
+    if len(targets) == 0:
+        return np.empty((0, 2), dtype=float)
     coeff = np.asarray(warp['coefficients'])
     center,span = np.asarray(warp['center']),np.asarray(warp['span'])
-    uv = (targets-coeff[0])@np.linalg.inv(coeff[1:3])
+    uv = (targets-coeff[0])@np.linalg.pinv(coeff[1:3])
     points = center+uv*span
     for _ in range(15):
         error = _features(points,center,span)@coeff-targets
@@ -416,7 +422,7 @@ def group_dots_detailed(yolo_outputs, img_width, img_height, *, config=None):
     data = data[ok]
     if not len(data):
         raise ValueError('All front detections failed relative-size filtering')
-    # Same-class duplicates only. Highest confidence wins; area breaks ties.
+    # Same-class duplicates only. Highest confidence wins; smaller area breaks ties.
     order = sorted(range(len(data)), key=lambda j: (-data[j,4], data[j,2]*data[j,3]))
     tree = cKDTree(data[:,:2]); suppressed, kept = set(), []
     for j in order:
@@ -436,6 +442,7 @@ def group_dots_detailed(yolo_outputs, img_width, img_height, *, config=None):
     if cfg.fit_mode not in ('auto','regular','warped'):
         raise ValueError('fit_mode must be auto, regular or warped')
     warp = None
+    regular_local = None
     regular_error = None
     calibrated = any(getattr(cfg,k) is not None for k in (
         'column_spacing','row_spacing','cell_pitch','line_pitch','x_origin','y_origin'))
@@ -449,6 +456,41 @@ def group_dots_detailed(yolo_outputs, img_width, img_height, *, config=None):
         ci, col, ex = _assign(flat[:,0], x0, dx, px, 2)
         li, row, ey = _assign(flat[:,1], y0, dy, py, 3)
         good = (np.abs(ex) <= dx*cfg.tolerance) & (np.abs(ey) <= dy*cfg.tolerance)
+        if (cfg.refine_lines or cfg.refine_segments) and len(flat) >= 30:
+            from services.line_refinement import refine_lines
+            train = np.ones(len(flat), dtype=bool)
+            # Stratify within each line: sampling every fifth page-wide point
+            # can alias with repeated row counts and leave lines unvalidated.
+            for line in np.unique(li):
+                indices = np.flatnonzero(li == line)
+                order = np.lexsort((flat[indices,1], flat[indices,0]))
+                train[indices[order[::5]]] = False
+
+            def coarse_sites(q, rows, line):
+                return np.column_stack([x0+dx*q, y0+py*line+dy*rows])
+
+            try:
+                candidate = refine_lines(
+                    flat, ci, col, li, row, good, train,
+                    np.array([px/dx, py/dy]), np.array([dx, dy]),
+                    cfg.tolerance, coarse_sites, refine_segments=cfg.refine_segments)
+            except (ValueError, np.linalg.LinAlgError):
+                candidate = None
+            if candidate is not None:
+                old_loss = np.minimum((ex/dx)**2+(ey/dy)**2, .5)
+                new_loss = np.minimum(candidate['ex']**2+candidate['ey']**2, .5)
+                # A local model must improve both training and held-out geometry,
+                # preserve coverage, and meet the same page quality threshold.
+                if (np.mean(new_loss[train]) < np.mean(old_loss[train])
+                        and np.mean(new_loss[~train]) < np.mean(old_loss[~train])
+                        and np.mean(candidate['good']) >= max(np.mean(good), cfg.min_accepted_fraction)
+                        and candidate['held_out_accepted_fraction'] >= max(
+                            float(np.mean(good[~train])), cfg.min_accepted_fraction)):
+                    regular_local = candidate
+                    ci, col, li, row = (candidate[k] for k in ('ci','col','li','row'))
+                    ex, ey = candidate['ex']*dx, candidate['ey']*dy
+                    good = candidate['good']
+                    warnings.append('Used independently refined regular-grid lines; inspect cell boundaries')
         if np.mean(good)<cfg.min_accepted_fraction:
             raise ValueError(f'Poor regular-grid fit ({np.mean(good):.1%} accepted; requires {cfg.min_accepted_fraction:.0%})')
     except ValueError as error:
@@ -472,53 +514,90 @@ def group_dots_detailed(yolo_outputs, img_width, img_height, *, config=None):
             rejected.append({'index': int(data[j,5]), 'reason': 'off grid', 'residual': [float(ex[j]), float(ey[j])]})
             continue
         key = (int(li[j]), int(ci[j]))
-        cell = cells.setdefault(key, {'bits': [0]*6, 'detections': [], 'scores': [], 'residuals': []})
+        cell = cells.setdefault(key, {'bits': [0]*6, 'slots': {}})
         bit = int(col[j]*3 + row[j])
+        # Geometry chooses the representative; confidence breaks equal-error ties.
+        # This does not create/remove bits, but avoids duplicate recovery anchors.
+        candidate = {'index': int(data[j,5]), 'score': float(data[j,4]),
+                     'residual': [float(ex[j]), float(ey[j])],
+                     'rank': (float((ex[j]/dx)**2 + (ey[j]/dy)**2),
+                              -float(data[j,4]), int(data[j,5]))}
+        previous = cell['slots'].get(bit)
+        if previous is not None:
+            loser = previous if candidate['rank'] < previous['rank'] else candidate
+            rejected.append({'index': loser['index'], 'reason': 'slot collision',
+                             'residual': loser['residual']})
+            if loser is candidate:
+                continue
         cell['bits'][bit] = 1
-        cell['detections'].append(int(data[j,5]))
-        cell['scores'].append(float(data[j,4]))
-        cell['residuals'].append([float(ex[j]), float(ey[j])])
+        cell['slots'][bit] = candidate
+    collision_count = sum(r['reason'] == 'slot collision' for r in rejected)
+    if collision_count:
+        warnings.append(f'{collision_count} duplicate slot assignments excluded from supporting evidence')
     codes, output_cells = [], []
     if cells:
         min_line, max_line = min(k[0] for k in cells), max(k[0] for k in cells)
         if max_line-min_line > 500:
             raise ValueError('Implausible line count')
+        global_min_col = min(k[1] for k in cells)
         for line in range(min_line, max_line+1):
             occupied = [k[1] for k in cells if k[0] == line]
             if occupied:
                 lo, hi = min(occupied), max(occupied)
+                if cfg.preserve_leading_spaces:
+                    lo = global_min_col
                 if hi-lo+1 > cfg.max_cells_per_line:
                     raise ValueError('Implausible cell count; verify pitch')
+                offsets = np.array([[column*dx, r*dy] for column in range(2) for r in range(3)])
+                origins = np.column_stack([x0+np.arange(lo, hi+1)*px,
+                                           np.full(hi-lo+1, y0+line*py)])
+                line_targets = (origins[:, None, :]+offsets).reshape(-1, 2)
+                # Batch each line to avoid repeating inverse-warp setup per cell.
+                line_sites_coarse = (_warp_sites(line_targets, warp) if warp is not None
+                                     else line_targets).reshape(-1, 6, 2)
                 for c in range(lo,hi+1):
                     entry = cells.get((line,c))
+                    evidence = [entry['slots'][b] for b in sorted(entry['slots'])] if entry else []
                     code = ''.join(map(str,entry['bits'])) if entry else '000000'
                     # Return predicted original-image dot positions for an overlay.
-                    sites = np.array([[x0+c*px+column*dx, y0+line*py+r*dy] for column in range(2) for r in range(3)])
+                    sites = line_sites_coarse[c-lo]
                     reference_sites = None
                     if warp is not None and str(line) in warp.get('line_models',{}):
-                        reference_sites = (_warp_sites(sites,warp) @ rotation.T).tolist()
+                        reference_sites = (sites @ rotation.T).tolist()
                         from services.line_refinement import line_sites
                         model = warp['line_models'][str(line)]
                         sites = line_sites(np.array([c*px+column for column in range(2) for _ in range(3)]),
                                            np.array([r for _ in range(2) for r in range(3)]),model)
-                    elif warp is not None:
-                        sites = _warp_sites(sites,warp)
+                    elif regular_local is not None and str(line) in regular_local['models']:
+                        reference_sites = (sites @ rotation.T).tolist()
+                        from services.line_refinement import line_sites
+                        sites = line_sites(
+                            np.array([c*px/dx+column for column in range(2) for _ in range(3)]),
+                            np.tile(np.arange(3), 2), regular_local['models'][str(line)])
                     sites = sites @ rotation.T
                     output_cells.append({'line': line-min_line, 'column': c-lo, 'grid_column': c,
                         'code': code, 'token_index': len(codes), 'sites': sites.tolist(),
                         'coarse_sites': reference_sites,
-                        'detections': entry['detections'] if entry else [],
-                        'min_score': min(entry['scores']) if entry else None,
-                        'residuals': entry['residuals'] if entry else []})
+                        'detections': [s['index'] for s in evidence],
+                        'min_score': min(s['score'] for s in evidence) if evidence else None,
+                        'residuals': [s['residual'] for s in evidence]})
                     codes.append(code)
             codes.append('\n')
     result = {'version': GROUPING_VERSION, 'codes': codes, 'cells': output_cells, 'warnings': warnings, 'rejected': rejected,
             'grid': {'fit_type': 'warped' if warp is not None else 'regular',
                      'coordinate_units': 'dot steps' if warp is not None else 'pixels',
                      'warp': warp, 'regular_fit_failure': regular_error,
+                     'line_refinement': ({'models': regular_local['models'],
+                         'held_out_accepted_fraction': regular_local['held_out_accepted_fraction'],
+                         'changed_assignments': regular_local['changed_assignments']}
+                         if regular_local is not None else None),
                      'angle_degrees': float(angle), 'x_origin': x0, 'y_origin': y0,
                      'column_spacing': dx, 'row_spacing': dy, 'cell_pitch': px, 'line_pitch': py,
-                     'x_fit_error': xs, 'y_fit_error': ys, 'accepted_fraction': float(np.mean(good))},
+                     'x_fit_error': xs, 'y_fit_error': ys, 'accepted_fraction': float(np.mean(good)),
+                     'retained_detection_count': len(data),
+                     'unique_slot_count': sum(len(c['slots']) for c in cells.values()),
+                     'slot_collision_count': collision_count,
+                     'unique_slot_fraction': float((np.sum(good)-collision_count)/len(data))},
             'config': asdict(cfg)}
     if cfg.recover_back_dots:
         from services.dot_recovery import recover_back_dots
