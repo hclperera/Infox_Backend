@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status, BackgroundTasks
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status, BackgroundTasks, Depends
+from services.sessions import require_user, require_owner
 
 from database import get_db_connection
 
@@ -230,6 +231,7 @@ async def scan_braille_image(
     background_tasks: BackgroundTasks,
     user_id: int = Form(..., description="ID of the authenticated app user"),
     file: UploadFile = File(..., description="JPEG image of the braille page"),
+    user=Depends(require_user),
 ):
     """
     POST /scan
@@ -246,7 +248,7 @@ async def scan_braille_image(
     # ------------------------------------------------------------------
     # Step 1: Validate user_id
     # ------------------------------------------------------------------
-    _ensure_user_exists(user_id)
+    require_owner(user, user_id)
 
     # ------------------------------------------------------------------
     # Step 2: Persist the uploaded file to disk
@@ -274,7 +276,7 @@ async def scan_braille_image(
 
 
 @router.get("/scan/{scan_id}")
-async def get_scan_status(scan_id: int):
+async def get_scan_status(scan_id: int, user=Depends(require_user)):
     """
     GET /scan/{scan_id}
     -------------------
@@ -284,8 +286,8 @@ async def get_scan_status(scan_id: int):
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT scan_id, status, translated_text, error_message FROM scans WHERE scan_id = %s",
-            (scan_id,)
+            "SELECT scan_id, status, translated_text, error_message FROM scans WHERE scan_id = %s AND user_id = %s",
+            (scan_id, user['user_id'])
         )
         row = cursor.fetchone()
         if row is None:

@@ -1,4 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class RefreshSessionRequest(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=256)
 
 # Schema for the signup endpoint
 class UserSignup(BaseModel):

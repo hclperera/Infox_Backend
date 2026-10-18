@@ -1,11 +1,16 @@
-from fastapi import APIRouter, HTTPException, status
-from schemas import UserSignup, UserLogin, UpdateUsernameRequest, ChangePasswordRequest
+from fastapi import APIRouter, HTTPException, status, Depends, Response
+from schemas import UserSignup, UserLogin, UpdateUsernameRequest, ChangePasswordRequest, RefreshSessionRequest
 from security import hash_password, verify_password
 from database import get_db_connection
 from services.registration_validation import registration_error
+from services.sessions import create_session, refresh_session, logout_session, require_user, require_owner, public_user
 
-# Create the router instance
-router = APIRouter()
+def prevent_auth_caching(response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Pragma'] = 'no-cache'
+
+
+router = APIRouter(dependencies=[Depends(prevent_auth_caching)])
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def signup(user: UserSignup):
@@ -52,30 +57,43 @@ def login(user: UserLogin):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     
-    # Fetch user by username
-    cursor.execute("SELECT * FROM users WHERE username = %s", (user.username,))
-    db_user = cursor.fetchone()
-    
-    cursor.close()
-    connection.close()
-    
-    # Verify user exists and password is correct
-    if not db_user or not verify_password(user.password, db_user["password_hash"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Invalid username or password"
-        )
-        
-    return {
-        "success": True, 
-        "message": "Login successful",
-        "user_id": db_user["user_id"],
-        "username": db_user["username"],
-        "email": db_user["email"]
-    }
+    try:
+        cursor.execute("SELECT * FROM users WHERE username = %s FOR UPDATE", (user.username.strip(),))
+        db_user = cursor.fetchone()
+        if not db_user or not verify_password(user.password, db_user['password_hash']):
+            raise HTTPException(401, 'Invalid username or password')
+        result = create_session(cursor, db_user)
+        connection.commit()
+        return result
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@router.post('/auth/refresh')
+def refresh(request: RefreshSessionRequest):
+    return refresh_session(request.refresh_token)
+
+
+@router.post('/auth/logout')
+def logout(request: RefreshSessionRequest):
+    logout_session(request.refresh_token)
+    return {'success': True}
+
+
+@router.get('/auth/me')
+def me(user=Depends(require_user)):
+    return public_user(user)
 
 @router.put("/update-username")
-async def update_username(request: UpdateUsernameRequest):
+async def update_username(request: UpdateUsernameRequest, authenticated_user=Depends(require_user)):
+    require_owner(authenticated_user, request.user_id)
+    request.new_username = request.new_username.strip()
+    if not request.new_username:
+        raise HTTPException(400, 'Please enter your username.')
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -111,13 +129,16 @@ async def update_username(request: UpdateUsernameRequest):
         conn.close()
 
 @router.put("/change-password")
-async def change_password(request: ChangePasswordRequest):
+async def change_password(request: ChangePasswordRequest, authenticated_user=Depends(require_user)):
+    require_owner(authenticated_user, request.user_id)
+    if not request.new_password:
+        raise HTTPException(400, 'Please enter your new password.')
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
         # Fetch user with current password hash
         cursor.execute(
-            "SELECT user_id, password_hash FROM users WHERE user_id = %s",
+            "SELECT user_id, password_hash FROM users WHERE user_id = %s FOR UPDATE",
             (request.user_id,)
         )
         user = cursor.fetchone()
@@ -132,11 +153,14 @@ async def change_password(request: ChangePasswordRequest):
             "UPDATE users SET password_hash = %s WHERE user_id = %s",
             (new_hash, request.user_id)
         )
+        cursor.execute('DELETE FROM user_sessions WHERE user_id = %s', (request.user_id,))
         conn.commit()
         return {"success": True, "message": "Password changed successfully"}
     except HTTPException:
+        conn.rollback()
         raise
     except Exception as e:
+        conn.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
         cursor.close()
