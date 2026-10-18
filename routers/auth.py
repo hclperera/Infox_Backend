@@ -2,12 +2,18 @@ from fastapi import APIRouter, HTTPException, status
 from schemas import UserSignup, UserLogin, UpdateUsernameRequest, ChangePasswordRequest
 from security import hash_password, verify_password
 from database import get_db_connection
+from services.registration_validation import registration_error
 
 # Create the router instance
 router = APIRouter()
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def signup(user: UserSignup):
+    error = registration_error(user.username, user.email, user.password)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    user.username = user.username.strip()
+    user.email = user.email.strip()
     connection = get_db_connection()
     cursor = connection.cursor()
     
