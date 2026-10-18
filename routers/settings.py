@@ -1,11 +1,13 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
+from services.sessions import require_user, require_owner
 from schemas import UserSettings
 from database import get_db_connection
 
 router = APIRouter()
 
 @router.get("/{user_id}")
-def get_settings(user_id: int):
+def get_settings(user_id: int, user=Depends(require_user)):
+    require_owner(user, user_id)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     
@@ -33,7 +35,8 @@ def get_settings(user_id: int):
 
 
 @router.put("/")
-def update_settings(settings: UserSettings):
+def update_settings(settings: UserSettings, user=Depends(require_user)):
+    require_owner(user, settings.user_id)
     connection = get_db_connection()
     cursor = connection.cursor()
     
