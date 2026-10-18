@@ -4,6 +4,19 @@ from security import hash_password, verify_password
 from database import get_db_connection
 from services.registration_validation import registration_error
 from services.sessions import create_session, refresh_session, logout_session, require_user, require_owner, public_user
+from services import sessions
+from datetime import timedelta
+from math import ceil
+
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_LOCK_DURATION = timedelta(minutes=15)
+
+
+def locked_response(seconds):
+    return HTTPException(
+        429, 'Too many incorrect passwords. Please try again when the lock expires.',
+        headers={'Retry-After': str(seconds), 'Cache-Control': 'no-store'},
+    )
 
 def prevent_auth_caching(response: Response):
     response.headers['Cache-Control'] = 'no-store'
@@ -60,8 +73,32 @@ def login(user: UserLogin):
     try:
         cursor.execute("SELECT * FROM users WHERE username = %s FOR UPDATE", (user.username.strip(),))
         db_user = cursor.fetchone()
-        if not db_user or not verify_password(user.password, db_user['password_hash']):
+        if not db_user:
             raise HTTPException(401, 'Invalid username or password')
+        # The user row lock serializes attempts across all API workers/devices.
+        cursor.execute('SELECT failed_attempts, locked_until FROM login_security WHERE user_id = %s',
+                       (db_user['user_id'],))
+        security = cursor.fetchone()
+        now = sessions.utcnow()
+        if security and security['locked_until'] and security['locked_until'] > now:
+            raise locked_response(max(1, ceil((security['locked_until'] - now).total_seconds())))
+        # Once a lock expires, the next attempt starts a fresh set of five.
+        failures = security['failed_attempts'] if security and not security['locked_until'] else 0
+        if not verify_password(user.password, db_user['password_hash']):
+            failures += 1
+            locked_until = now + LOGIN_LOCK_DURATION if failures >= MAX_LOGIN_ATTEMPTS else None
+            if security:
+                cursor.execute('UPDATE login_security SET failed_attempts = %s, locked_until = %s WHERE user_id = %s',
+                               (failures, locked_until, db_user['user_id']))
+            else:
+                cursor.execute('INSERT INTO login_security (user_id, failed_attempts, locked_until) VALUES (%s, %s, %s)',
+                               (db_user['user_id'], failures, locked_until))
+            # Persist failed attempts before raising the HTTP error.
+            connection.commit()
+            if locked_until:
+                raise locked_response(int(LOGIN_LOCK_DURATION.total_seconds()))
+            raise HTTPException(401, 'Invalid username or password')
+        cursor.execute('DELETE FROM login_security WHERE user_id = %s', (db_user['user_id'],))
         result = create_session(cursor, db_user)
         connection.commit()
         return result
