@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from routers import auth, braille, settings
 from security import hash_password, verify_password
-from services import sessions
+from services import sessions, password_recovery
 
 
 class Cursor:
@@ -33,7 +33,7 @@ class Cursor:
         if row is None or not self.dictionary:
             return row
         result = dict(zip((d[0] for d in self.raw.description), row))
-        for key in ('access_expires_at', 'refresh_expires_at', 'locked_until'):
+        for key in ('access_expires_at', 'refresh_expires_at', 'locked_until', 'expires_at', 'sent_at', 'window_started_at'):
             if key in result and result[key] is not None:
                 result[key] = datetime.fromisoformat(result[key])
         return result
@@ -64,7 +64,7 @@ class Connection:
         self.raw.close()
 
 
-class SessionApiTests(unittest.TestCase):
+class ApiTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.password_hash = hash_password(' original password ')
@@ -85,6 +85,9 @@ class SessionApiTests(unittest.TestCase):
                     voice_type TEXT, haptic_vibration INTEGER);
                 CREATE TABLE login_security (user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
                     failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until TEXT);
+                CREATE TABLE password_reset_state (user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                    code_hash TEXT, nonce TEXT, expires_at TEXT, failed_attempts INTEGER DEFAULT 0,
+                    sent_at TEXT, window_started_at TEXT, send_count INTEGER DEFAULT 0);
                 CREATE TABLE scans (scan_id INTEGER PRIMARY KEY, user_id INTEGER,
                     status TEXT, translated_text TEXT, error_message TEXT);
                 INSERT INTO scans VALUES (10, 1, 'done', 'first document', NULL);
@@ -95,7 +98,7 @@ class SessionApiTests(unittest.TestCase):
                 (2, 'other', 'other@example.com', self.password_hash),
             ])
             conn.commit()
-        for module in (sessions, auth, settings, braille):
+        for module in (sessions, auth, settings, braille, password_recovery):
             patcher = patch.object(module, 'get_db_connection', lambda: Connection(self.path))
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -121,6 +124,7 @@ class SessionApiTests(unittest.TestCase):
     def headers(session):
         return {'Authorization': 'Bearer ' + session['access_token']}
 
+class SessionApiTests(ApiTestCase):
     def test_fifth_failure_locks_and_correct_password_cannot_bypass(self):
         for attempt in range(5):
             response = self.client.post('/login', json={'username': ' reader ', 'password': 'wrong'})
