@@ -113,22 +113,66 @@ PUNCTUATION = {
 SANYAKA = {'ග': 'ඟ', 'ජ': 'ඦ', 'ඩ': 'ඬ', 'ද': 'ඳ', 'බ': 'ඹ'}
 
 
-def translate_detailed(codes, *, overrides=None):
+def _roman_list_marker(codes, start, overrides):
+    """Recognize an explicit dots-56 English letter sign in a list label only.
+
+    EBAE lowercase Roman convention: BANA ABCs of UEB section 6.5,
+    https://www.brailleauthority.org/ueb/abcs/abcs-ueb.html
+    This does not enable general English or contracted Braille decoding.
+    """
+    import re
+    if codes[start] != '000011':
+        return None
+    # Require the first non-space token on a line.
+    previous = start - 1
+    while previous >= 0 and codes[previous] == WORD_SPACE:
+        previous -= 1
+    if previous >= 0 and codes[previous] != '\n':
+        return None
+    roman = {'010100': 'i', '111001': 'v', '101101': 'x', '111000': 'l',
+             '100100': 'c', '100110': 'd', '101100': 'm'}
+    end = start + 1
+    letters = []
+    while end < len(codes) and codes[end] in roman and len(letters) < 15:
+        letters.append(roman[codes[end]])
+        end += 1
+    text = ''.join(letters)
+    if (not text or not re.fullmatch(r'm{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})', text)
+            or end >= len(codes) or codes[end] != '010011'
+            or (end+1 < len(codes) and codes[end+1] not in (WORD_SPACE, '\n'))
+            or any(index in overrides for index in range(start, end+1))):
+        return None
+    return text + '.', end + 1
+
+
+def translate_detailed(codes, *, overrides=None, roman_list_markers=True,
+                       numeric_punctuation=False):
     """Return text plus indexed warnings. overrides maps token index to text.
 
     Prefix virama follows this project's existing convention. This is an
     uncontracted literary decoder, not a complete Sinhala/Nemeth translator.
     Ambiguous letters default to letters and are reported, not silently guessed.
+    Six-dot Unicode Braille is also accepted. numeric_punctuation opts into
+    comma/period continuation between digits (UEB-style); it is disabled for
+    existing Sinhala transcriptions whose numeric convention is unspecified.
     """
     import unicodedata
-    codes = list(codes)
+    original_codes = list(codes)
+    # Normalize before look-ahead: a malformed list/dict cell must not crash a
+    # prefix's dictionary lookup or swallow the following valid character.
+    codes = []
+    for code in original_codes:
+        if isinstance(code, str) and len(code) == 1 and 0x2800 <= ord(code) <= 0x283f:
+            bits = ord(code)-0x2800
+            code = ''.join('1' if bits & (1 << bit) else '0' for bit in range(6))
+        codes.append(code if isinstance(code, str) else '')
     overrides = overrides or {}
     result, warnings = [], []
     number = consonant = paren = quote = False
     i = 0
 
     def warn(index, reason):
-        warnings.append({'index': index, 'code': codes[index], 'reason': reason})
+        warnings.append({'index': index, 'code': original_codes[index], 'reason': reason})
 
     def emit_cons(char, dead=False):
         if result and result[-1].endswith('්') and char in ('ර', 'ය'):
@@ -154,6 +198,13 @@ def translate_detailed(codes, *, overrides=None):
             number = consonant = False
             i += 1
             continue
+        marker = _roman_list_marker(codes, i, overrides) if roman_list_markers else None
+        if marker is not None:
+            warn(i, 'Marked Roman list label interpreted using the English letter-sign convention')
+            label, i = marker
+            result.append(label)
+            number = consonant = False
+            continue
         if code == NUM_INDICATOR:
             number = following in DIGITS
             consonant = False
@@ -164,6 +215,12 @@ def translate_detailed(codes, *, overrides=None):
             continue
         if number and code in DIGITS:
             result.append(DIGITS[code])
+            i += 1
+            continue
+        if (numeric_punctuation and number and code in ('010000', '010011')
+                and following in DIGITS and i+1 not in overrides):
+            result.append(PUNCTUATION[code])
+            consonant = False
             i += 1
             continue
         number = False

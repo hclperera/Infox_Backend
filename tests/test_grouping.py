@@ -32,6 +32,75 @@ def text_lines(result):
 
 
 class GroupingTests(unittest.TestCase):
+    def test_regular_refinement_keeps_clean_grid_and_calibration(self):
+        expected = [['111111', '101000', '000000', '100000', '111111']]*4
+        rows = detections(expected)
+        config = GridConfig(refine_lines=True, angle_degrees=0, column_spacing=15,
+                            row_spacing=15, cell_pitch=40, line_pitch=60,
+                            x_origin=100, y_origin=100)
+        result = group_dots_detailed(rows, 1000, 1000, config=config)
+        self.assertEqual(text_lines(result), expected)
+        self.assertEqual(result['grid']['coordinate_units'], 'pixels')
+        config.x_origin = 108
+        with self.assertRaises(ValueError):
+            group_dots_detailed(rows, 1000, 1000, config=config)
+
+    def test_regular_line_refinement_recovers_bent_lines_and_overlay(self):
+        expected = [['111111'] * 16 for _ in range(5)]
+        rows = detections(expected)
+        for dot in rows:
+            x, y = dot[1]*1000, dot[2]*1000
+            line = round((y-115)/60)
+            dot[2] += 5.5*np.cos(line*np.pi)*((x-407.5)/307.5)**2/1000
+        calibration = dict(angle_degrees=0, column_spacing=15, row_spacing=15,
+                           cell_pitch=40, line_pitch=60, x_origin=100, y_origin=100)
+        with self.assertRaises(ValueError):
+            group_dots_detailed(rows, 1000, 1000, config=GridConfig(**calibration))
+        result = group_dots_detailed(rows, 1000, 1000,
+                                    config=GridConfig(refine_lines=True, **calibration))
+        self.assertEqual(text_lines(result), expected)
+        self.assertIsNone(result['grid']['warp'])
+        self.assertEqual(result['grid']['line_refinement']['held_out_accepted_fraction'], 1.)
+        for cell in result['cells']:
+            for bit, detection in enumerate(cell['detections']):
+                np.testing.assert_allclose(cell['sites'][bit],
+                                           np.array(rows[detection][1:3])*1000, atol=.1)
+
+    def test_slot_collisions_keep_one_anchor_and_report_unique_coverage(self):
+        expected = [['111111'] * 5] * 3
+        rows = detections(expected)
+        rows[0][1], rows[0][5] = .098, .8
+        duplicate = rows[0].copy()
+        duplicate[1], duplicate[5] = .102, .95
+        rows.append(duplicate)
+        config = GridConfig(angle_degrees=0, column_spacing=15, row_spacing=15,
+                            cell_pitch=40, line_pitch=60, x_origin=100, y_origin=100)
+        result = group_dots_detailed(rows, 1000, 1000, config=config)
+        self.assertEqual(text_lines(result), expected)
+        first = result['cells'][0]
+        self.assertEqual(len(first['detections']), 6)
+        self.assertIn(len(rows)-1, first['detections'])
+        self.assertNotIn(0, first['detections'])
+        self.assertEqual(result['grid']['slot_collision_count'], 1)
+        self.assertEqual(result['grid']['accepted_fraction'], 1.)
+        self.assertAlmostEqual(result['grid']['unique_slot_fraction'], 90/91)
+
+    def test_indentation_is_optional_and_blank_lines_are_preserved(self):
+        expected = [['111111'] * 4, [], ['000000', '000000', '111111', '101000']]
+        rows = detections(expected)
+        # With no adjacent lines, the repetition pitch requires calibration.
+        calibration = dict(angle_degrees=0, column_spacing=15, row_spacing=15,
+                           cell_pitch=40, line_pitch=60, x_origin=100, y_origin=100)
+        plain = group_dots_detailed(rows, 1000, 1000, config=GridConfig(**calibration))
+        aligned = group_dots_detailed(rows, 1000, 1000,
+                                     config=GridConfig(preserve_leading_spaces=True, **calibration))
+        self.assertEqual(text_lines(plain)[2], expected[2][2:])
+        self.assertEqual(text_lines(aligned), expected)
+
+    def test_empty_warp_sites(self):
+        from services.grouping import _warp_sites
+        self.assertEqual(_warp_sites(np.empty((0, 2)), {}).shape, (0, 2))
+
     def test_independently_bent_lines_recover_known_dot_sites(self):
         from services.line_refinement import refine_lines, line_sites
         ids=np.array([(cell,col,line,row) for line in range(5)

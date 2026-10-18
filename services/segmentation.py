@@ -5,6 +5,7 @@ import logging
 import threading
 from pathlib import Path
 from dotenv import load_dotenv
+from services.page_validation import page_crop_box
 
 load_dotenv()
 
@@ -59,8 +60,6 @@ def run_vision_stages(image_path: str, *, debug_dir=None) -> dict:
 
 def _run(image_path, *, debug_dir=None):
     import cv2
-    import numpy as np
-    from sahi.predict import get_sliced_prediction
     img = cv2.imread(str(image_path))
     if img is None:
         raise ValueError(f'Cannot decode image: {image_path}')
@@ -70,12 +69,14 @@ def _run(image_path, *, debug_dir=None):
     if os.getenv('PAGE_CROP', '1') == '1':
         result = _get_page_model().predict(source=img, save=False, max_det=1, conf=.6,
                                            device=os.getenv('DEVICE','cpu'), verbose=False)[0]
-        if result.boxes is not None and len(result.boxes):
-            x1,y1,x2,y2 = result.boxes.xyxy[0].cpu().numpy()
-            crop_box = [max(0,int(np.floor(x1))), max(0,int(np.floor(y1))),
-                        min(iw,int(np.ceil(x2))), min(ih,int(np.ceil(y2)))]
-        else:
-            warnings.append('No page detected; used full image')
+        boxes = result.boxes.xyxy.cpu().numpy() if result.boxes is not None else []
+        if len(boxes) == 0 and debug_dir is not None:
+            folder = Path(debug_dir); folder.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(folder/'page_detection_failed.png'), img):
+                logger.warning('Could not save failed page-detection image')
+        crop_box, page_warnings = page_crop_box(
+            boxes, iw, ih, allow_full_image=os.getenv('PAGE_ALLOW_FULL_IMAGE', '0') == '1')
+        warnings.extend(page_warnings)
     x1,y1,x2,y2 = crop_box
     if x2 <= x1 or y2 <= y1:
         raise ValueError('Page model returned an empty crop')
@@ -86,6 +87,7 @@ def _run(image_path, *, debug_dir=None):
     gray = cv2.bilateralFilter(gray, 9, 75, 75)
     enhanced = cv2.createCLAHE(clipLimit=2., tileGridSize=(8,8)).apply(gray)
     detector_input = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    from sahi.predict import get_sliced_prediction
     model = _get_dot_model()
     front_id, names = _front_id(model.model.names)
     settings = dict(slice_height=640, slice_width=640, overlap_height_ratio=.2,

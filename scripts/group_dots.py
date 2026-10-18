@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from services.grouping import GridConfig, group_dots_detailed
+from services.grouping import group_dots_detailed
+from services.pipeline_config import grid_config_for_vision
 from services.translation import translate_detailed
 
 
@@ -28,6 +29,7 @@ def is_detection_file(path):
 def process_file(path, output, args):
     settings = json.loads(args.config.read_text(encoding="utf-8")) if args.config else {}
     raw = path.read_text(encoding="utf-8-sig")
+    vision = {}
     if path.suffix.lower() == ".json":
         vision = json.loads(raw)
         rows = vision["yolo_outputs"]
@@ -59,7 +61,7 @@ def process_file(path, output, args):
     if args.review:
         settings["min_accepted_fraction"] = .80
         settings.setdefault("refine_lines", True)
-    result = group_dots_detailed(rows, width, height, config=GridConfig(**settings))
+    result = group_dots_detailed(rows, width, height, config=grid_config_for_vision(vision, settings))
     if not result["codes"]:
         raise ValueError("No usable front dots")
     translation = translate_detailed(result["codes"])

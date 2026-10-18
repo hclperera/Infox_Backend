@@ -179,7 +179,8 @@ def process_scan_task(scan_id: int, image_path: str):
 
         # --- Person 3: Spatial grouping of dots into braille codes ---
         current_step = "grouping"
-        from services.grouping import GridConfig, group_dots_detailed
+        from services.grouping import group_dots_detailed
+        from services.pipeline_config import grid_config_for_vision
         config_path = os.getenv("BRAILLE_GRID_CONFIG")
         config_data = json.loads(Path(config_path).read_text(encoding="utf-8")) if config_path else {}
         config_data["front_class_id"] = vision_result["front_class_id"]
@@ -187,7 +188,7 @@ def process_scan_task(scan_id: int, image_path: str):
             vision_result["yolo_outputs"],
             vision_result["img_width"],
             vision_result["img_height"],
-            config=GridConfig(**config_data),
+            config=grid_config_for_vision(vision_result, config_data),
         )
         braille_codes = grouped["codes"]
         (debug_dir / "grouping.json").write_text(
@@ -198,7 +199,10 @@ def process_scan_task(scan_id: int, image_path: str):
         # --- Person 4: Translate braille codes to Sinhala text ---
         current_step = "translation"
         from services.translation import translate_detailed
-        translated = translate_detailed(braille_codes)
+        translation_config_path = os.getenv("BRAILLE_TRANSLATION_CONFIG")
+        translation_settings = (json.loads(Path(translation_config_path).read_text(encoding="utf-8"))
+                                if translation_config_path else {})
+        translated = translate_detailed(braille_codes, **translation_settings)
         sinhala_text = translated["text"]
         (debug_dir / "translation.json").write_text(
             json.dumps(translated, ensure_ascii=False, indent=2), encoding="utf-8")
