@@ -104,8 +104,6 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     created_at DATETIME(6) NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
-<<<<<<< Updated upstream
-=======
 
 -- Server-enforced login lockout. Timestamps are UTC.
 CREATE TABLE IF NOT EXISTS login_security (
@@ -127,4 +125,3 @@ CREATE TABLE IF NOT EXISTS password_reset_state (
     send_count INT NOT NULL DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
->>>>>>> Stashed changes
