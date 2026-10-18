@@ -1,6 +1,15 @@
 from pydantic import BaseModel, Field
 
 
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=1, max_length=254)
+
+
+class PasswordResetConfirm(PasswordResetRequest):
+    code: str = Field(pattern=r'^[0-9]{8}$')
+    new_password: str = Field(min_length=1, max_length=72)
+
+
 class RefreshSessionRequest(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=256)
 

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from routers import auth, braille, settings
 from security import hash_password, verify_password
-from services import sessions
+from services import sessions, password_recovery
 
 
 class Cursor:
@@ -33,8 +33,13 @@ class Cursor:
         if row is None or not self.dictionary:
             return row
         result = dict(zip((d[0] for d in self.raw.description), row))
+<<<<<<< Updated upstream
         for key in ('access_expires_at', 'refresh_expires_at'):
             if key in result:
+=======
+        for key in ('access_expires_at', 'refresh_expires_at', 'locked_until', 'expires_at', 'sent_at', 'window_started_at'):
+            if key in result and result[key] is not None:
+>>>>>>> Stashed changes
                 result[key] = datetime.fromisoformat(result[key])
         return result
 
@@ -64,7 +69,7 @@ class Connection:
         self.raw.close()
 
 
-class SessionApiTests(unittest.TestCase):
+class ApiTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.password_hash = hash_password(' original password ')
@@ -83,6 +88,14 @@ class SessionApiTests(unittest.TestCase):
                     access_expires_at TEXT, refresh_expires_at TEXT, created_at TEXT);
                 CREATE TABLE settings (settings_id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE, speech_rate REAL,
                     voice_type TEXT, haptic_vibration INTEGER);
+<<<<<<< Updated upstream
+=======
+                CREATE TABLE login_security (user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until TEXT);
+                CREATE TABLE password_reset_state (user_id INTEGER PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                    code_hash TEXT, nonce TEXT, expires_at TEXT, failed_attempts INTEGER DEFAULT 0,
+                    sent_at TEXT, window_started_at TEXT, send_count INTEGER DEFAULT 0);
+>>>>>>> Stashed changes
                 CREATE TABLE scans (scan_id INTEGER PRIMARY KEY, user_id INTEGER,
                     status TEXT, translated_text TEXT, error_message TEXT);
                 INSERT INTO scans VALUES (10, 1, 'done', 'first document', NULL);
@@ -93,7 +106,7 @@ class SessionApiTests(unittest.TestCase):
                 (2, 'other', 'other@example.com', self.password_hash),
             ])
             conn.commit()
-        for module in (sessions, auth, settings, braille):
+        for module in (sessions, auth, settings, braille, password_recovery):
             patcher = patch.object(module, 'get_db_connection', lambda: Connection(self.path))
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -119,6 +132,52 @@ class SessionApiTests(unittest.TestCase):
     def headers(session):
         return {'Authorization': 'Bearer ' + session['access_token']}
 
+<<<<<<< Updated upstream
+=======
+class SessionApiTests(ApiTestCase):
+    def test_fifth_failure_locks_and_correct_password_cannot_bypass(self):
+        for attempt in range(5):
+            response = self.client.post('/login', json={'username': ' reader ', 'password': 'wrong'})
+            self.assertEqual(response.status_code, 401 if attempt < 4 else 429)
+        self.assertEqual(response.headers['retry-after'], '900')
+        self.assertEqual(response.headers['cache-control'], 'no-store')
+        self.now += timedelta(seconds=60)
+        # A separate HTTP client represents another device/process.
+        with TestClient(self.client.app) as other:
+            response = other.post('/login', json={'username': 'reader', 'password': ' original password '})
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers['retry-after'], '840')
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(conn.execute('SELECT failed_attempts FROM login_security').fetchone()[0], 5)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM user_sessions').fetchone()[0], 0)
+        self.login('other')
+        self.now += timedelta(seconds=840)
+        self.login()
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM login_security').fetchone()[0], 0)
+
+    def test_expired_lock_restarts_count_and_success_resets_failures(self):
+        for _ in range(5):
+            self.client.post('/login', json={'username': 'reader', 'password': 'wrong'})
+        self.now += timedelta(minutes=15)
+        self.assertEqual(self.client.post('/login', json={'username': 'reader', 'password': 'wrong'}).status_code, 401)
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(conn.execute('SELECT failed_attempts, locked_until FROM login_security').fetchone(), (1, None))
+        self.login()
+        for _ in range(4):
+            self.assertEqual(self.client.post('/login', json={'username': 'reader', 'password': 'wrong'}).status_code, 401)
+        self.login()
+
+    def test_unknown_users_and_database_failures_do_not_create_locks(self):
+        for _ in range(6):
+            self.assertEqual(self.client.post('/login', json={'username': 'missing', 'password': 'wrong'}).status_code, 401)
+        with patch.object(auth, 'verify_password', side_effect=RuntimeError('simulated failure')):
+            with self.assertRaises(RuntimeError):
+                self.client.post('/login', json={'username': 'reader', 'password': 'wrong'})
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM login_security').fetchone()[0], 0)
+
+>>>>>>> Stashed changes
     def test_signup_validation_runs_before_database_and_hashes_password(self):
         with patch.object(auth, 'get_db_connection', side_effect=AssertionError('Must not query DB')):
             for body in ({'username': ' ', 'email': 'a@example.com', 'password': 'x'},

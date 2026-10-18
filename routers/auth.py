@@ -1,4 +1,7 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Response
+from fastapi import APIRouter, HTTPException, status, Depends, Response, BackgroundTasks
+from schemas import PasswordResetRequest, PasswordResetConfirm
+from services import password_recovery
+from services.registration_validation import is_valid_registration_email
 from schemas import UserSignup, UserLogin, UpdateUsernameRequest, ChangePasswordRequest, RefreshSessionRequest
 from security import hash_password, verify_password
 from database import get_db_connection
@@ -11,6 +14,20 @@ def prevent_auth_caching(response: Response):
 
 
 router = APIRouter(dependencies=[Depends(prevent_auth_caching)])
+
+
+@router.post('/auth/password-reset/request', status_code=202)
+def request_password_reset(request: PasswordResetRequest, background: BackgroundTasks):
+    if not is_valid_registration_email(request.email.strip()):
+        raise HTTPException(400, 'Please enter a valid email address.')
+    password_recovery.configuration()
+    background.add_task(password_recovery.issue_reset, request.email)
+    return {'success': True, 'message': password_recovery.REQUEST_MESSAGE, 'resend_after_seconds': 60}
+
+
+@router.post('/auth/password-reset/confirm')
+def confirm_password_reset(request: PasswordResetConfirm):
+    return password_recovery.reset_password(request.email, request.code, request.new_password)
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def signup(user: UserSignup):
@@ -154,6 +171,7 @@ async def change_password(request: ChangePasswordRequest, authenticated_user=Dep
             (new_hash, request.user_id)
         )
         cursor.execute('DELETE FROM user_sessions WHERE user_id = %s', (request.user_id,))
+        password_recovery.invalidate_code(cursor, request.user_id)
         conn.commit()
         return {"success": True, "message": "Password changed successfully"}
     except HTTPException:
