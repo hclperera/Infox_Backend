@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # We will import our routers here as we build them
-from routers import auth, settings, admin, braille
+from routers import auth, settings, admin, braille, history
 # from routers import history
 
 app = FastAPI(title="InfoX Assistive Reader API")
@@ -25,6 +25,7 @@ app.include_router(auth.router, tags=["Authentication"])
 app.include_router(settings.router, prefix="/settings", tags=["Settings"])
 app.include_router(admin.router, prefix="/admin", tags=["Admin"])
 app.include_router(braille.router, tags=["Braille Scan"])
+app.include_router(history.router, tags=["Scan History"])
 
 @app.get("/")
 def health_check():
